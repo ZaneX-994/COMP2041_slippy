@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+
+import sys, re
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("commands", nargs="*")
+parser.add_argument("-n", "--notPrint", action="store_true", help="not print")
+parser.add_argument("-f", "--file", action="store_true", help="command line option")
+parser.add_argument("-i", "--insertFile", action="store_true", help="replace file with output content")
+args = parser.parse_args()
+
+FROM_TO = r'(\/?)[^\/]*?\1,(\/?)[^\/]*?\2[pd];'
+REGEX = r'(\/)[^\/]*\1[qpd];'
+REGEX_NUM = r'[$0-9]*[qpd];'
+FROM_TO_SUB = r'(\/?)[^\/]*?\1,(\/?)[^\/]*?\2s(.).*\3.*\3g?;'
+REGEX_SUB = r'(\/)[^\/]*\1s(.).*\2.*\2g?;'
+REGEX_NUM_SUB = r'[$0-9]*s(.).*\1.*\1g?;'
+REGEX_A_I_C_COMMAND = r'\/[^\/]*\/[aic].*'
+REGEX_NUM_A_I_C_COMMAND = r'[$0-9]*[aic].*'
+FROM_TO_A_I_C_COMMAND = r'(\/?).*\1,(\/?).*\2[aic]'
+
+# used to write line to required stream i.e. stdout or file
+def outPut(output, nOption, stream):
+    if not nOption and output != None:
+        stream.write(output + '\n')
+        
+
+def getSpan(command, d3):
+    d3_num = 0
+    skip = False
+    position = 0
+    stop = False
+    while not stop:
+        if command[position] == d3 and not skip:
+            d3_num += 1
+        if command[position] == '[' and not skip:
+            skip = True
+        elif command[position] == ']' and skip:
+            skip = False
+        if command[position] == ';':
+            if d3_num >= 3 and (d3_num - 3) % 2 == 0:
+                stop = True
+        position += 1
+    return command[:position - 1]
+
+# helper function to remove ';' character before
+def cleanup(command):
+    while command.startswith(';'):
+        command = command[1:]
+    return command
+# helper function used to get regex expression in append/insert/change command
+def getRegex(command):
+    position = 0
+    regex = ''
+    while command[position] not in 'aic':
+        regex += command[position]
+        position += 1
+    return regex
+
+# split commands
+def getCommand():
+    command = ''
+    try:
+        if not args.file:
+            command = args.commands[0]
+        
+        else:
+            filename = args.commands[0]
+            with open(filename) as f:
+                for line in f:
+                    command += line
+    except ValueError as e:
+        print('slippy: command line: invalid command')
+
+    # remove comments
+    command = re.sub(r'#[^;]*(;)?', r'\1', command) 
+    # deal with new line command
+    command = ';'.join(command.split('\n'))
+    # remove white spaces
+    command = re.sub(r'\s+', '', command)
+    command += ';'
+    commands = []
+    while command != '':
+        m = None
+        command = cleanup(command)        
+        if command == '':
+            break
+        if m:= re.match(REGEX, command):
+            
+            regex = command[m.span()[0]:m.span()[1] - 2]
+            commands.append([command[m.span()[1] - 2], regex, '', False])
+        elif m:= re.match(REGEX_NUM, command):
+            
+            regex = command[m.span()[0]:m.span()[1] - 2]
+            commands.append([command[m.span()[1] - 2], regex, '', False])
+        elif m:= re.match(FROM_TO, command):
+            # deal with comma
+            from_to = command[m.span()[0]:m.span()[1] - 2].split(',')
+            start = from_to[0]
+            end = from_to[1]
+            commands.append([command[m.span()[1] - 2], start, end, False])
+        elif m:= re.match(REGEX_SUB, command):
+            span = getSpan(command, m.group(2))
+            subcommand = span.split(m.group(2))
+            regex = None
+            subRegex = None
+            subString = None
+            gOption = False
+            if m.group(1) == m.group(2):
+                regex = f'/{subcommand[1]}/'
+                subRegex = subcommand[3]
+                subString = subcommand[4]
+                gOption = True if subcommand[5] != '' else False
+            else:
+                regex = subcommand[0][0:-1]
+                subRegex = subcommand[1]
+                subString = subcommand[2]
+                gOption = True if subcommand[3] != '' else False
+            commands.append(['s', regex, '', subRegex, subString, gOption, False])
+            command = command[len(span):]
+            continue
+        elif m:= re.match(REGEX_NUM_SUB, command):
+            span = getSpan(command, m.group(1))
+            subcommand = span.split(m.group(1))            
+            regex = subcommand[0][:-1]
+            subRegex = subcommand[1]
+            subString = subcommand[2]
+            gOption = True if subcommand[3] != '' else False
+            commands.append([subcommand[0][-1],regex, '', subRegex, subString, gOption, False])
+            command = command[len(span):]
+            continue
+        elif m:= re.match(FROM_TO_SUB, command):
+            
+            span = getSpan(command, m.group(3))
+            subcommand = span.split(',')            
+            regexStart = subcommand[0]
+            subcommand = subcommand[1].split(m.group(3))
+
+            if m.group(2) == m.group(3):
+                regexEnd = f'/{subcommand[1]}/'
+                subRegex = subcommand[3]
+                subString = subcommand[4]
+                gOption = True if subcommand[5] != '' else False
+            else:
+                regexEnd = subcommand[0][:-1]
+                subRegex = subcommand[1]
+                subString = subcommand[2]
+                gOption = True if subcommand[3] != '' else False
+            
+            commands.append(['s', regexStart, regexEnd, subRegex, subString, gOption, False])
+            command = command[len(span):]
+            continue
+        elif m:= re.match(REGEX_A_I_C_COMMAND, command):
+            regex = getRegex(command)
+            string = command[1 + len(regex):-1]
+            commands.append([command[len(regex)], regex, '', string,False])
+        elif m:= re.match(REGEX_NUM_A_I_C_COMMAND, command):
+            regex = getRegex(command)
+            string = command[1 + len(regex):-1]
+            commands.append([command[len(regex)], regex, '', string, False])
+        elif m:= re.match(FROM_TO_A_I_C_COMMAND, command):
+            regexes = m.group().split(',')
+            start = regexes[0]
+            end = regexes[1][0:-1]
+            string = command[2 + len(start) + len(end):-1]
+            commands.append([command[1 + len(start) + len(end)], start, end, string,False])
+            command = ''
+            continue
+        command = command[:m.span()[0]] + command[m.span()[1]:]
+    return commands
+# quit program when regex is matched
+def quitCommand(regex, nOption, line, count, stream):
+    if line == None:
+        return line
+    if regex == '':
+        outPut(line, nOption, stream)
+        sys.exit(0)
+    if regex != '$':
+        if regex.startswith('/') and regex.endswith('/'):
+            if re.search(rf'{regex[1:-1]}', line):
+                outPut(line, nOption, stream)
+                sys.exit(0)
+            else:
+                return line
+        else:
+            if count == int(regex):
+                outPut(line, nOption, stream)
+                sys.exit(0)
+            else:
+                return line
+    else:
+        if end:
+            outPut(line, nOption, stream)
+            sys.exit(0)
+        else:
+            return line
+        
+# end = '' if there's no ','
+# print line if regexes (start - end) is matched otherwise return the line
+def printCommand(start, end, nOption, line, count, EOF, pAgain, stream):
+    if line == None:
+        return(line, pAgain)
+    skip = False
+    if start == '' and end == '':
+        outPut(line, nOption, stream)
+        return (line, pAgain)
+    if end == '':
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line):
+                outPut(line, False, stream)
+                return (line, pAgain)
+            else:
+                pAgain = False
+        elif start == '$':
+            if EOF:
+                outPut(line, False, stream)
+                return (line, True)
+        elif count == int(start):
+            outPut(line, False, stream)
+            return (line, True)
+    else:
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line) and not pAgain:
+                outPut(line, False, stream)
+                pAgain = True
+                skip = True
+        elif start == '$':
+            if EOF:
+                outPut(line, False, stream)
+                return (line, True)
+        elif count == int(start):
+            outPut(line, False, stream)
+            pAgain = True
+            skip = True
+        if end.startswith('/') and end.endswith('/'):
+            
+            if pAgain:
+                if not skip:
+                    outPut(line, False, stream)
+                if re.search(rf'{end[1:-1]}', line): 
+                    pAgain = False
+        elif end == '$':
+            if pAgain:
+                outPut(line, nOption, stream)
+                return (line, pAgain)
+        else:
+            if count > int(end) and pAgain:
+                pAgain = False
+            elif count == int(end) and pAgain:
+                outPut(line, nOption, stream)
+                pAgain = False
+
+    return (line, pAgain)
+
+# turn line into '' if regex is matched
+def deleteCommand(start, end, line, count, EOF, deleteStart):
+    if start == '' and end == '':
+        return (deleteStart, None)
+    if end == '':
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line):
+                return (deleteStart, None)
+        elif start == '$':
+            if EOF:
+                return (deleteStart, None)
+        elif count == int(start):
+            return (deleteStart, None)
+    else:
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line):
+                deleteStart = True
+                return (deleteStart, None)
+        elif start == '$':
+            if EOF:
+                return (deleteStart, None)
+        elif count == int(start):
+            
+            deleteStart = True
+            return (deleteStart, None)
+    if end.startswith('/') and end.endswith('/'):
+        if re.search(rf'{end[1:-1]}', line) and deleteStart:
+            deleteStart = False
+            return (deleteStart, None)            
+    elif end == '$':
+        if deleteStart:
+            return (deleteStart, None)
+    else:
+        if deleteStart and count > int(end):
+            deleteStart = False
+        elif deleteStart and count == int(end):
+            deleteStart = False
+            return (deleteStart, None)
+
+    return (deleteStart, line) if not deleteStart else (deleteStart, None)
+# when regexes (start - end) matched, substitute subRegex with subString if line contains subRegex
+def substituteCommand(start, end, subRegex, subString, line, count, EOF, subStart, gOption):
+    skip = False
+    if start == '' and end == '':
+        if re.search(rf'{subRegex}', line):
+            if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+            else:
+                line = re.sub(rf'{subRegex}', subString, line, 1)
+    elif end == '':
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line) and re.search(rf'{subRegex}', line):
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+        elif start == '$':
+            if EOF:
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+        elif count == int(start):
+            if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+            else:
+                line = re.sub(rf'{subRegex}', subString, line, 1)
+    else:
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line) and not subStart:
+                skip = True
+                subStart = True
+        elif start == '$':
+            if EOF:
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+                subStart = True
+        elif count == int(start) and not subStart:
+            if re.search(rf'{subRegex}', line):
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+            subStart = True
+        
+        if end.startswith('/') and end.endswith('/'):
+            if re.search(rf'{end[1:-1]}', line) and not skip:
+                
+                if re.search(rf'{subRegex}', line) and subStart:
+                    if gOption:
+                        line = re.sub(rf'{subRegex}', subString, line)
+                    else:
+                        line = re.sub(rf'{subRegex}', subString, line, 1)
+                    subStart = False
+            else:
+                
+                if subStart:
+                    if gOption:
+                        line = re.sub(rf'{subRegex}', subString, line)
+                    else:
+                        line = re.sub(rf'{subRegex}', subString, line, 1)
+            
+        elif end == '$':
+            if subStart:
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+        else:
+            if subStart and count > int(end):
+                subStart = False
+            elif subStart and count == int(end):
+                subStart = False
+                if gOption:
+                    line = re.sub(rf'{subRegex}', subString, line)
+                else:
+                    line = re.sub(rf'{subRegex}', subString, line, 1)
+    
+    return (subStart, line)
+# helper function for input from files
+def getFiles(files):
+    res = []
+    for filename in files:
+        res.append(filename)
+    return res
+# helper function to get all content from files
+def getContent(files):
+    content = []
+    for filename in files:
+        with open(filename) as f:
+            for line in f:
+                content.append(line.strip())
+    return content
+# helper functions for Append/Insert/Change command
+def appendAction(line, string, action_start):
+    return  (line.strip() + '\n' + string.strip(), action_start)
+def insertAciton(line, string, action_start):
+    return (string.strip() + '\n' + line.strip(), action_start)
+def changeAction(string, action_start):
+    return (string.strip(), action_start)
+
+# Note: currently change command changes everyline matched
+# i.e. 1d; 1,2c hi shouldnt change
+def A_I_C_command(command, start, end, line, count, EOF, string, action_start):
+    if line == None:
+        return(line, action_start)
+    skip = False
+    if start == '' and end == '':
+        if command == 'c':
+            return changeAction(string, action_start)
+        return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+    if end == '':
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line):
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+            else:
+                action_start = False
+        elif start == '$':
+            if EOF:
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+        elif count == int(start):
+            return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+    else:
+        if start.startswith('/') and start.endswith('/'):
+            if re.search(rf'{start[1:-1]}', line) and not action_start:
+                action_start = True
+                skip = True
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+        elif start == '$':
+            if EOF:
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+        elif count == int(start):
+            action_start = True
+            skip = True
+            if command == 'c':
+                return changeAction(string, action_start)
+            return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+        if end.startswith('/') and end.endswith('/'):
+            if action_start:
+                if not skip:
+                    if command == 'c':
+                        return changeAction(string, action_start)
+                    return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+                if re.search(rf'{end[1:-1]}', line): 
+                    action_start = False
+        elif end == '$':
+            if action_start:
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+        else:
+            if count > int(end) and action_start:
+                action_start = False
+            elif count == int(end) and action_start:
+                action_start = False
+                if command == 'c':
+                    return changeAction(string, action_start)
+                return appendAction(line, string, action_start) if command == 'a' else insertAciton(line, string, action_start)
+    return (line, action_start)
+if __name__ == "__main__":
+
+    commands = getCommand()
+    end = False # end of the file (EOF)
+    files = []
+    InputFiles = False
+    if len(args.commands) > 1:
+        InputFiles = True
+        files = getFiles(args.commands[1:])
+    
+    content = getContent(files) if InputFiles else []
+    content.append('EOF')
+    
+    count = 1
+    line = input() if not InputFiles else content[0]
+    stream = sys.stdout if not args.insertFile else open(args.commands[1], 'w')
+
+    while True:
+        nextline = sys.stdin.readline().strip() if not InputFiles else content[count]
+        if not nextline or nextline == 'EOF':
+            end = True
+        notPrint = args.notPrint
+        for command in commands:
+            if command[0] == 'q':
+                line = quitCommand(command[1], notPrint, line, count, stream)
+            elif command[0] == 'p':
+                res = printCommand(command[1], command[2], notPrint, line, count, end, command[-1], stream)
+                line = res[0]
+                command[-1] = res[1]
+            elif command[0] == 'd':
+                res = deleteCommand(command[1], command[2], line, count, end, command[-1])
+                command[-1] = res[0]
+                line = res[1]
+            elif command[0] == 's':
+                res = substituteCommand(command[1], command[2], command[3], command[4], line, count, end, command[-1], command[5])
+                command[-1] = res[0]
+                line = res[1]
+            elif command[0] == 'a' or 'i' or 'c':
+                res = A_I_C_command(command[0], command[1], command[2], line, count, end, command[3], command[-1])
+                line = res[0]
+                command[-1] = res[1]
+        outPut(line, notPrint, stream)
+        notPrint = True
+        if end:
+            break
+        line = nextline
+        count += 1
+   
